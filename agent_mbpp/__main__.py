@@ -360,11 +360,11 @@ async def main(
 
                     if tool_name == "run_tests":
                         last_run_tests_result = tool_result
+
                         if (
                             candidate_code is not None
-                            and isinstance(tool_result, (list, tuple))
-                            and len(tool_result) > 0
-                            and tool_result[0] == "ok"
+                            and isinstance(tool_result, dict)
+                            and tool_result.get("status") == "ok"
                         ):
                             passed_code = candidate_code
                             passed_test_result = tool_result

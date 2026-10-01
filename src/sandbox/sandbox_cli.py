@@ -12,9 +12,12 @@ from src.sandbox.sandbox_model import Sandbox
 from src.mcp.mcp_client import MCPClient
 from multiprocessing import get_context
 from time import monotonic
+import json
 import argparse
 import asyncio
 import docker
+import sys
+import os
 
 
 def main_wrapper() -> None:
@@ -49,8 +52,17 @@ async def main(
     sandbox = Sandbox(config)
     ctx = get_context("spawn")
     container = None
+    testbed_path = os.getenv("TESTBED_PATH")
+
+    if (
+        mcp_stdio
+        and "swebench" in mcp_stdio
+        and testbed_path
+    ):
+        client = MCPClient(mcp_stdio, None)
+
     # if stdio on swebench:
-    if mcp_stdio and "swebench" in mcp_stdio:
+    elif mcp_stdio and "swebench" in mcp_stdio:
         task_file = "../cache/swebench_task.json"
         handler = JsonHandler()
         task = handler.task_loader(task_file)
@@ -96,26 +108,43 @@ async def main(
         return
 
     try:
+        piped_input = not sys.stdin.isatty()
         while True:
             parent_conn, child_conn = ctx.Pipe()
-            try:
-                code = input("\033[33m>>>\033[0m")
-            except EOFError:
-                break
-            if code == "exit":
-                break
 
-            queue = ctx.Queue()
+            if piped_input:
+                code = sys.stdin.read()
+
+                if not code.strip():
+                    break
+            else:
+                # Normal interactive REPL mode.
+                try:
+                    code = input("\033[33m>>>\033[0m")
+                except EOFError:
+                    break
+
+                if code == "exit":
+                    break
+
+                if not code.strip():
+                    continue
+            partial_parent_conn, partial_child_conn = ctx.Pipe(duplex=False)
+            queue = ctx.SimpleQueue()
             process = ctx.Process(
                 target=sandbox.worker,
-                args=(code, queue, tool_names, child_conn)
+                args=(code, queue, tool_names, child_conn, partial_child_conn)
             )
 
             process.start()
             time_start = monotonic()
             timed_out = False
 
+            partial_output = []
+
             while process.is_alive():
+                while partial_parent_conn.poll():
+                    partial_output.append(partial_parent_conn.recv())
                 if parent_conn.poll(0.05):
                     # get the instructions from the pipe and call adequate tool
                     tool_call_instructions = parent_conn.recv()
@@ -140,7 +169,8 @@ async def main(
                             result = structured["result"]
                         else:
                             result = structured
-
+                        if not isinstance(result, str):
+                            result = json.dumps(result)
                         parent_conn.send({
                             "type": "tool_result",
                             "status": "ok",
@@ -152,13 +182,17 @@ async def main(
                             "status": "ok",
                             "result": res_tool.content[0].text
                             })
-                if monotonic() - time_start >= 5:
+                if (monotonic() - time_start >=
+                        config.max_execution_time_seconds):
                     process.terminate()
                     process.join()
                     timed_out = True
                     break
 
             if timed_out:
+                if partial_output:
+                    print("".join(partial_output), end="")
+
                 print(
                     "Execution timed out, it may be because of an"
                     " infinite loop"
@@ -166,6 +200,8 @@ async def main(
             else:
                 res = queue.get()
                 print(res)
+            if piped_input:
+                break
     finally:
         await client.close()
         if mcp_stdio and "swebench" in mcp_stdio:

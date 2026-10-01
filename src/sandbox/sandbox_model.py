@@ -16,6 +16,20 @@ import resource
 import traceback
 
 
+class StreamingBuffer(StringIO):
+    def __init__(self, partial_conn: Connection) -> None:
+        super().__init__()
+        self.partial_conn = partial_conn
+
+    def write(self, text: str) -> int:
+        written = super().write(text)
+
+        if text:
+            self.partial_conn.send(text)
+
+        return written
+
+
 class Sandbox():
     def __init__(self, config: SandboxConfig) -> None:
         self.config = config
@@ -36,6 +50,7 @@ class Sandbox():
         # we define it here so it is always available
         self.last_tool_result: Any = None
         self.namespace: dict[str, Any] = {
+            "final_answer": self.final_answer,
             "__builtins__": {
                 "open": self.open_authorized,
                 "__import__": self.module_import,
@@ -69,6 +84,7 @@ class Sandbox():
                 "abs": abs,
                 "round": round,
                 "pow": pow,
+                "MemoryError": MemoryError,
                 "divmod": divmod,
                 "chr": chr,
                 "ord": ord,
@@ -81,7 +97,13 @@ class Sandbox():
                 "slice": slice,
                 "repr": repr,
                 "format": format,
+                "dir": dir,
                 "Exception": Exception,
+                "ZeroDivisionError": ZeroDivisionError,
+                "ImportError": ImportError,
+                "PermissionError": PermissionError,
+                "NameError": NameError,
+                "AttributeError": AttributeError,
                 "AssertionError": AssertionError,
                 "ValueError": ValueError,
                 "TypeError": TypeError,
@@ -197,7 +219,8 @@ class Sandbox():
             code: str,
             queue: Queue,
             tools: list[str],
-            child_conn: Connection
+            child_conn: Connection,
+            partial_conn: Any = None
     ) -> None:
         # creates the wrapper for the MCP tools
         # we pass the proxy for each tool to our sandbox namespace
@@ -218,7 +241,7 @@ class Sandbox():
              self.config.max_memory_mb * 1024 * 1024)
         )
         try:
-            res = self.execute(code)
+            res = self.execute(code, partial_conn)
             if ('File "<sandbox>"' in res or
                     "['timeout'" in res or "['error" in res):
                 queue.put(("error", res))
@@ -227,12 +250,15 @@ class Sandbox():
         except FinalAnswerException as e:
             queue.put(("final", e.code))
 
-    def execute(self, code: str) -> str:
+    def execute(self, code: str, partial_conn: Any = None) -> str:
         # exec the code and redirects all outputs (out and err)
         # to buffer *file*, returning its value
         # doing so assures no print on terminal during execution
         # and allows persistance of printed datas
-        buffer = StringIO()
+        if partial_conn is not None:
+            buffer = StreamingBuffer(partial_conn)
+        else:
+            buffer = StringIO()
         buffer_err = StringIO()
         try:
             self.last_tool_result = None
