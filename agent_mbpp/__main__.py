@@ -3,6 +3,7 @@
 # pyright: reportUnknownMemberType = false
 # pyright: reportUnknownVariableType = false
 # pyright: reportAttributeAccessIssue = false
+# pyright: reportUnnecessaryIsInstance = false
 from src.mbpp.mbpp_models import StepMetrics, SolutionOutput
 from src.sandbox.sandbox_config import SandboxConfig
 from src.mbpp.json_load_dump import JsonHandler
@@ -56,6 +57,8 @@ async def main(
     agent_start = monotonic()
     total_input_token = 0
     total_output_token = 0
+    total_requests = 0
+    max_output_tokens = 1500
     res = ""
     steps: list[StepMetrics] = []
     # ================ TASK LOADING ================
@@ -98,45 +101,52 @@ async def main(
     #
     system_prompt = (
         "You are a coding agent solving an MBPP Python task.\n"
-        "Output exactly one executable ```python``` block and nothing else.\n"
-        "Use the exact function signature provided.\n"
-        "Solve the task generally.\n\n"
+        "Output exactly one complete executable ```python``` "
+        "block and nothing else.\n"
+        "Use the exact function signature provided.\n\n"
+
+        "The natural-language task definition is authoritative.\n"
+        "Public tests are incomplete examples and may not cover all "
+        "required behavior.\n"
+        "Before writing the solution, account for every semantic "
+        "requirement in the task definition, including qualifiers, "
+        "ordering rules, equivalence rules, and edge cases implied "
+        "by the wording.\n"
+        "Solve the task generally, not only for the public tests.\n"
+        "Be concise: no explanations, docstrings, comments, "
+        "examples, or extra tests.\n\n"
 
         f"{manual}\n\n"
 
-        "The functions run_tests(...) and final_answer(...) are already "
-        "available in the sandbox.\n"
-        "NEVER define, override, mock, or reimplement them.\n"
-        "Do not use XML tags or native <tool_call> syntax.\n\n"
+        "run_tests(...) and final_answer(...) already exist in the sandbox.\n"
+        "Never define, override, mock, or reimplement them.\n"
+        "Do not use XML or native API tool calling.\n"
+        "Write calls to them as ordinary Python code.\n\n"
 
-        "When calling run_tests, use EXACTLY the provided test_imports and "
-        "test_list unchanged.\n"
-        "Never add, remove, modify, or invent tests.\n"
-        "The provided public tests are the only tests that run_tests should "
-        "execute.\n"
-        "Do not infer hidden tests or invent unsupported input types.\n\n"
+        "The agent automatically supplies the official "
+        "test_imports and test_list when run_tests is executed.\n"
+        "Do not pass, copy, modify, or invent tests yourself.\n"
+        "Call run_tests only as run_tests(code=code).\n\n"
 
-        "Use this workflow:\n"
-        "1. Put the candidate solution in a string variable named code.\n"
-        "2. Call run_tests(...) using EXACTLY the provided public tests.\n"
-        "3. Print the test result.\n"
-        "4. If the tests pass, immediately call final_answer(code=code).\n"
-        "5. If they fail, modify only the "
-        "candidate solution, not the tests.\n\n"
+        "Workflow:\n"
+        "1. Read the task definition carefully and identify all "
+        "required behavior.\n"
+        "2. Store a general candidate solution in a variable named code.\n"
+        "3. Call result = run_tests(code=code).\n"
+        "4. If tests fail, fix the candidate on the next turn.\n"
+        "5. Passing tests only confirms the public cases; the "
+        "candidate must still implement the full task definition.\n"
+        "6. You may call final_answer(code=code) when tests pass, "
+        "but the agent will also automatically submit a candidate "
+        "that passes run_tests.\n\n"
 
         "Required response shape:\n"
         "```python\n"
         "code = 'def example(x):\\n    return x'\n"
-        "result = run_tests(\n"
-        f"    test_imports={task.test_imports!r},\n"
-        f"    test_list={task.test_list!r},\n"
-        "    code=code,\n"
-        ")\n"
-        "print(result)\n"
-        "if result and result[0] == 'ok':\n"
-        "    final_answer(code=code)\n"
+        "run_tests(code=code)\n"
         "```\n"
     )
+
     if "gpt-oss-120b" in model_name:
         system_prompt += (
             "IMPORTANT: Do not use the model/API native "
@@ -148,9 +158,12 @@ async def main(
             "Your response itself must be plain text "
             "containing the Python code block.\n\n"
         )
+
     task_prompt = (
         f"Task definition:\n{task.task_definition}\n\n"
-        f"Function definition:\n{task.function_definition}"
+        f"Function definition:\n{task.function_definition}\n\n"
+        # f"Official test imports:\n{task.test_imports!r}\n\n"
+        # f"Official public tests:\n{task.test_list!r}\n"
     )
     messages = [
         {
@@ -173,10 +186,22 @@ async def main(
     try:
         for iterations in range(10):
             # ================ GENERATION ================
+            remaining_output = max_output_tokens - total_output_token
+            if remaining_output <= 0:
+                print("MBPP output-token budget exhausted")
+                break
+
+            output_limit = min(500, remaining_output)
+
             # timing the request
             request_start = monotonic()
             # start the generation
-            llm_res, retries = llm.generate(model_name, messages, 500)
+            llm_res, retries = llm.generate(
+                model_name,
+                messages,
+                output_limit
+            )
+            total_requests += 1 + retries
             # add the duration for metrics
             request_time = (monotonic() - request_start) * 1000
             # adding output to future message prompt
@@ -194,11 +219,13 @@ async def main(
                 # the same reason we dont add it again.
                 observation = (
                     "NO_EXECUTABLE_CODE_EXTRACTED.\n"
-                    "Nothing was executed in the sandbox.\n"
-                    "Retry using exactly one complete executable "
-                    "Python code block.\n"
-                    "Call run_tests once. If it returns 'ok', call "
-                    "final_answer(code=code) in the same block."
+                    "Nothing was executed.\n"
+                    "Retry with exactly one SHORT "
+                    "complete ```python``` block.\n"
+                    "No explanations, docstrings, "
+                    "comments, examples, or tests.\n"
+                    "Use only a candidate code "
+                    "variable and run_tests(code=code)."
                 )
 
                 if llm_res.usage is not None:
@@ -220,7 +247,7 @@ async def main(
                     steps.append(step)
 
                 recovery_message = (
-                    f"Iteration: {iterations + 1}/30\n"
+                    f"Iteration: {iterations + 1}/10\n"
                     "Type: extract_error\n"
                     f"Response: {observation}\n"
                 )
@@ -254,6 +281,11 @@ async def main(
             # is the core method in the sandbox, it will try to exec
             # the code and return th result at the end
 
+            passed_code: str | None = None
+            passed_test_result = None
+            run_tests_called = False
+            last_run_tests_result = None
+
             process = ctx.Process(
                 target=sandbox.worker,
                 args=(code, queue, tool_names, child_conn))
@@ -275,33 +307,68 @@ async def main(
             # to our configuration
 
             while process.is_alive():
-                # check every 0.05s if theres an objet in the pipe
+                # check every 0.05s if theres an object in the pipe
                 if parent_conn.poll(0.05):
                     # get the instructions from the pipe and call adequate tool
                     tool_call_instructions = parent_conn.recv()
-                    if tool_call_instructions["tool"] == "run_tests":
-                        tool_call_instructions[
-                            "args"]["test_imports"] = task.test_imports
-                        tool_call_instructions[
-                            "args"]["test_list"] = task.test_list
+                    tool_name = tool_call_instructions["tool"]
+                    tool_args = dict(tool_call_instructions["args"])
+
+                    candidate_code = None
+
+                    if tool_name == "run_tests":
+                        run_tests_called = True
+                        candidate_code = tool_args.get("code")
+                        tool_args["test_imports"] = task.test_imports
+                        tool_args["test_list"] = task.test_list
+
                     res_tool = await client.call_tool(
-                        tool_call_instructions["tool"],
-                        tool_call_instructions["args"]
-                        )
+                        tool_name,
+                        tool_args
+                    )
                     print(f"STRUCTURED CONTENT:\n{res_tool}\n")
-                    # send formated output to child connection
+
                     if res_tool.isError:
+                        tool_result = res_tool.content[0].text
                         parent_conn.send({
                             "type": "tool_result",
                             "status": "error",
-                            "result": res_tool.content[0].text
-                            })
+                            "result": tool_result
+                        })
                     elif res_tool.structuredContent:
+                        structured = res_tool.structuredContent
+                        if (
+                            isinstance(structured, dict)
+                            and set(structured.keys()) == {"result"}
+                        ):
+                            tool_result = structured["result"]
+                        else:
+                            tool_result = structured
+
                         parent_conn.send({
                             "type": "tool_result",
                             "status": "ok",
-                            "result": res_tool.structuredContent["result"]
-                            })
+                            "result": tool_result
+                        })
+                    else:
+                        tool_result = res_tool.content[0].text
+                        parent_conn.send({
+                            "type": "tool_result",
+                            "status": "ok",
+                            "result": tool_result
+                        })
+
+                    if tool_name == "run_tests":
+                        last_run_tests_result = tool_result
+                        if (
+                            candidate_code is not None
+                            and isinstance(tool_result, (list, tuple))
+                            and len(tool_result) > 0
+                            and tool_result[0] == "ok"
+                        ):
+                            passed_code = candidate_code
+                            passed_test_result = tool_result
+
                 # kill the process if timeout
                 if monotonic() - time_start >= (
                     config.max_execution_time_seconds
@@ -310,6 +377,8 @@ async def main(
                     process.terminate()
                     process.join()
                     break
+
+            process.join()
             # ================ METRICS ================
             # Extraction of the result with queue.get then send it back
             # to the LLM for next iteration
@@ -340,52 +409,102 @@ async def main(
                             sandbox_output="timeout",
                             retries=retries
                         )
+                    steps.append(step)
                     print("TIMEOUT")
-                else:
-                    type, res = queue.get()
-                    observation = res
-                    if type == "output" and res == "":
-                        observation = "Code executed successfully"
-                        " with no output"
-                    step = StepMetrics(
-                            step=iterations+1,
-                            input_tokens=llm_res.usage.input_tokens,
-                            output_tokens=llm_res.usage.output_tokens,
-                            request_time_ms=request_time,
-                            api_url=str(llm.client.base_url),
-                            model_name=llm_res.model,
-                            llm_output=llm_res.output_text,
-                            sandbox_input=code,
-                            sandbox_output=res,
-                            retries=retries
-                        )
-                    if type == "final":
-                        print(f"FINAL ANSWER GENERATED:\n{res}")
-                        total_time = monotonic() - agent_start
-                        steps.append(step)
-                        solution = SolutionOutput(
-                            task_id=str(task.task_id),
-                            benchmark="mbpp",
-                            success=True,
-                            solution=res,
-                            system_prompt=system_prompt,
-                            iterations=iterations+1,
-                            total_requests=iterations+1,
-                            total_input_tokens=total_input_token,
-                            total_output_tokens=total_output_token,
-                            total_time_seconds=total_time,
-                            steps=steps
-                        )
-                        handler.solution_dump(solution, output_file)
-                        break
                     messages.append({
                         "role": "user",
-                        "content": f"Iteration: {iterations}\n"
-                        f"Type: {type}\nResponse: {observation}\n"
-                        })
-                    # print("RESPONSE:\n", res, "TYPE:\n", type)
-                    # print("EXIT CODE:", process.exitcode)
+                        "content": (
+                            f"Iteration: {iterations + 1}/10\n"
+                            "Type: timeout\n"
+                            "Response: Sandbox execution timed out.\n"
+                        )
+                    })
+                    continue
+
+                type, res = queue.get()
+
+                final_code: str | None = None
+                auto_finalized = False
+
+                if type == "final":
+                    final_code = str(res)
+                    observation = str(res)
+                elif passed_code is not None:
+                    final_code = passed_code
+                    auto_finalized = True
+                    type = "final"
+                    observation = (
+                        "AUTO_FINALIZED_AFTER_OFFICIAL_TESTS_PASS.\n"
+                        f"run_tests result: {passed_test_result}"
+                    )
+                    print(
+                        "AUTO FINAL ANSWER: "
+                        "candidate passed official MBPP tests"
+                    )
+                else:
+                    if run_tests_called:
+                        observation = (
+                            "OFFICIAL TESTS EXECUTED:\n"
+                            f"{task.test_list!r}\n\n"
+                            "RESULT:\n"
+                            f"{last_run_tests_result}"
+                        )
+                    else:
+                        observation = str(res)
+                        if type == "output" and res == "":
+                            observation = (
+                                "Code executed successfully with no output. "
+                                "Call run_tests(code=code)."
+                            )
+
+                step = StepMetrics(
+                        step=iterations+1,
+                        input_tokens=llm_res.usage.input_tokens,
+                        output_tokens=llm_res.usage.output_tokens,
+                        request_time_ms=request_time,
+                        api_url=str(llm.client.base_url),
+                        model_name=llm_res.model,
+                        llm_output=llm_res.output_text,
+                        sandbox_input=code,
+                        sandbox_output=str(observation),
+                        retries=retries
+                    )
+
+                if final_code is not None:
+                    if auto_finalized:
+                        print(f"FINAL ANSWER GENERATED (AUTO):\n{final_code}")
+                    else:
+                        print(f"FINAL ANSWER GENERATED:\n{final_code}")
+
+                    total_time = monotonic() - agent_start
+                    steps.append(step)
+                    solution = SolutionOutput(
+                        task_id=str(task.task_id),
+                        benchmark="mbpp",
+                        success=True,
+                        solution=final_code,
+                        system_prompt=system_prompt,
+                        iterations=iterations+1,
+                        total_requests=total_requests,
+                        total_input_tokens=total_input_token,
+                        total_output_tokens=total_output_token,
+                        total_time_seconds=total_time,
+                        steps=steps
+                    )
+                    handler.solution_dump(solution, output_file)
+                    break
+
                 steps.append(step)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Iteration: {iterations + 1}/10\n"
+                        f"Type: {type}\n"
+                        f"Response:\n{observation}\n"
+                    )
+                })
+                # print("RESPONSE:\n", res, "TYPE:\n", type)
+                # print("EXIT CODE:", process.exitcode)
             # ⚠️⚠️REMOVE AFTER TESTING⚠️⚠️
             # break
 
