@@ -46,7 +46,8 @@ async def main(
 
     # ================ DEFAULTS ================
     if not model_name or model_name == "":
-        model_name = "qwen/qwen3.8-27b"
+        # model_name = "qwen/qwen3.8-27b"
+        model_name = "openai/gpt-oss-120b"
     if not provider_url or provider_url == "":
         provider_url = "https://api.groq.com/openai/v1"
 
@@ -319,13 +320,11 @@ async def main(
 
                 print("STATUS:", llm_res.status)
                 print("INCOMPLETE:", llm_res.incomplete_details)
-
-                if llm_res.usage:
-                    print("OUTPUT TOKENS:", llm_res.usage.output_tokens)
-                    print(
-                        "REASONING TOKENS:",
-                        llm_res.usage.output_tokens_details.reasoning_tokens
-                    )
+                print("OUTPUT TOKENS:", llm_res.usage.output_tokens)
+                print(
+                    "REASONING TOKENS:",
+                    llm_res.usage.output_tokens_details.reasoning_tokens
+                )
 
                 if time_out:
                     # pass timeout to llm
