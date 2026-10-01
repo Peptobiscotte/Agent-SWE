@@ -19,10 +19,10 @@ if transport not in ("stdio", "streamable-http"):
 
 @mcp.tool()
 def run_tests(
-    test_imports: list[str],
     test_list: list[str],
-    code: str
-) -> tuple[str, str]:
+    code: str,
+    test_imports: list[str] | None = None,
+) -> dict[str, object]:
     """
     Run an MBPP candidate solution against the provided public tests.
 
@@ -46,6 +46,8 @@ def run_tests(
             code="def add(a, b):\\n    return a + b",
         )
     """
+    if test_imports is None:
+        test_imports = []
     code_whole = "\n".join(test_imports)
     code_whole += "\n" + code + "\n"
     code_whole += "\n".join(test_list)
@@ -57,10 +59,18 @@ def run_tests(
             timeout=5
         )
     except subprocess.TimeoutExpired:
-        return ("timeout", "Execution stopped after 5 seconds")
+        return {"status": "timeout",
+                "success": False,
+                "output": "Execution stopped after 30 seconds"}
     if res.returncode == 0:
-        return ("ok", "All tests passed")
-    return ("error", res.stderr)
+        return {
+            "status": "ok",
+            "success": True,
+            "output": "All tests passed"
+        }
+    return ({"status": "error",
+             "success": False,
+             "output": res.stderr})
 
 
 if __name__ == "__main__":
