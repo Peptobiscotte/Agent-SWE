@@ -262,6 +262,7 @@ class Sandbox():
         buffer_err = StringIO()
         try:
             self.last_tool_result = None
+
             with redirect_stdout(buffer):
                 # we use compile to add our sandbox name for traceback
                 exec(compile(code, "<sandbox>", "exec"), self.namespace)

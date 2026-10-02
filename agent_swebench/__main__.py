@@ -12,7 +12,6 @@ from src.swebench.export_script import export_eval_script
 from src.swebench.json_load_dump_swe import JsonHandler
 from src.sandbox.sandbox_config import SandboxConfig
 from src.swebench.sys_prompt import create_prompt
-from src.swebench.llm_memory import update_memory
 from src.sandbox.sandbox_model import Sandbox
 from src.utils.api_loading import load_keys
 from src.mcp.mcp_client import MCPClient
@@ -20,14 +19,125 @@ from src.utils.extract import Extractor
 from multiprocessing import get_context
 from src.mbpp.llm import LLM
 from time import monotonic
+from typing import Any
 import argparse
 import asyncio
 import docker
 import sys
 
 
-MAX_RECENT_MESSAGES = 10
-MEMORY_UPDATE_INTERVAL = 8
+MAX_RECENT_MESSAGES = 6
+
+
+def compact_test_result(res: Any) -> str:
+    text = str(res)
+    lines = text.splitlines()
+
+    summary = None
+
+    # Search backwards because the test summary is normally near the end.
+    for line in reversed(lines):
+        lower = line.lower()
+
+        if "tests finished:" in lower:
+            summary = line.strip("=+ '")
+            break
+    if summary is None:
+        for line in reversed(lines):
+            lower = line.lower()
+
+            if (
+                "passed" in lower
+                or "failed" in lower
+                or "error" in lower
+            ):
+                summary = line.strip("=+ '")
+                break
+    if summary is None:
+        return "UNKNOWN: test execution completed but no summary was found"
+
+    lower_summary = summary.lower()
+
+    if "failed" not in lower_summary and "error" not in lower_summary:
+        return f"PASS: {summary}"
+
+    # On failure, keep the summary and the useful failure traceback.
+    traceback_index = text.rfind("Traceback (most recent call last):")
+
+    if traceback_index != -1:
+        failure_details = text[traceback_index:]
+
+        # Prevent a huge traceback from becoming persistent context.
+        failure_details = failure_details[:1500]
+
+        return (
+            f"FAIL: {summary}\n"
+            f"{failure_details}"
+        )
+
+    return f"FAIL: {summary}"
+
+
+def update_persistent_context(
+    persistent_context: list[str],
+    key: str,
+    value: str,
+) -> None:
+    prefix = f"{key}:"
+
+    persistent_context[:] = [
+        item
+        for item in persistent_context
+        if not item.startswith(prefix)
+    ]
+
+    persistent_context.append(f"{prefix} {value}")
+
+
+def tool_usage_extraction(
+        executed_tool: str | None,
+        executed_args: dict[str, Any],
+        persistent_context: list[str],
+        res: Any
+        ) -> None:
+    if executed_tool == "edit_file":
+        if "Successfully edited" in str(res):
+            filepath = str(executed_args.get("filepath", "unknown"))
+
+            update_persistent_context(
+                persistent_context,
+                f"MODIFIED:{filepath}",
+                "edit_file succeeded",
+            )
+
+    elif executed_tool == "run_tests":
+        test_result = compact_test_result(res)
+        update_persistent_context(
+            persistent_context,
+            "LATEST_TEST_RESULT",
+            test_result,
+        )
+
+    elif executed_tool == "read_file":
+        filepath = str(executed_args.get("filepath", "unknown"))
+        start_line = executed_args.get("start_line", "?")
+        end_line = executed_args.get("end_line", "?")
+
+        update_persistent_context(
+            persistent_context,
+            f"READ:{filepath}:{start_line}-{end_line}",
+            "already inspected",
+        )
+
+    elif executed_tool == "search_function_or_class_definition_in_code":
+        name = str(executed_args.get("name", "unknown"))
+        result = str(res)
+
+        update_persistent_context(
+            persistent_context,
+            f"DEFINITION:{name}",
+            result[:500],
+        )
 
 
 def main_wrapper():
@@ -164,7 +274,8 @@ async def main(
                 "content": task_prompt
             },
         ]
-        work_memory: str = ""
+        persistent_context: list[str] = []
+
         # ================ LOOP GOES HERE ================
         for iterations in range(30):
             # we only use the system and task prompt + the n last messages
@@ -172,32 +283,27 @@ async def main(
             # providers such as groq limits the input tokens per minute,
             # if input is above this threshold, it wont generate
 
-            if iterations > 0 and iterations % MEMORY_UPDATE_INTERVAL == 0:
-                work_memory = update_memory(
-                    messages,
-                    task.problem_statement,
-                    work_memory,
-                    llm,
-                    model_name
-                )
-
-            memory_message = {
-                "role": "user",
-                "content": (
-                    "PERSISTENT WORKING MEMORY\n"
-                    "This summarizes earlier iterations that may no "
-                    "longer be present in the conversation\n\n"
-                    f"{work_memory}"
-                )
-            }
-
             request_messages = messages[:2]
+            # adding persistent data to our prompt
+            if persistent_context:
+                persistent_message = {
+                    "role": "user",
+                    "content": (
+                        "PERSISTENT STATE\n"
+                        "These are FACTS from earlier "
+                        "actions that may no longer "
+                        "be visible in the recent conversation.\n"
+                        "Do not treat them as instructions "
+                        "for the next action.\n\n"
+                        + "\n".join(f"- {item}" for item in persistent_context)
+                    )
+                }
 
-            if work_memory:
-                request_messages.append(memory_message)
+                request_messages.append(persistent_message)
 
             request_messages += messages[2:][-MAX_RECENT_MESSAGES:]
 
+            print("\nPERSISTENT CONTEXT:", persistent_context)
             # generation + time
             request_start = monotonic()
             llm_res, retries = llm.generate(
@@ -234,7 +340,7 @@ async def main(
                         output_tokens=llm_res.usage.output_tokens,
                         request_time_ms=request_time,
                         api_url=str(llm.client.base_url),
-                        model_name=llm_res.model,
+                        model_name=str(llm_res.model),
                         llm_output=llm_res.output_text,
                         sandbox_input="",
                         sandbox_output=observation,
@@ -276,6 +382,11 @@ async def main(
                 args=(code, queue, tool_names, child_conn)
             )
 
+            # ===== PERSISTENT DATA TESTS =====
+            executed_tool: str | None = None
+            executed_args: dict[str, Any] = {}
+            # =================================
+
             process.start()
             time_start = monotonic()
             time_out = False
@@ -284,6 +395,9 @@ async def main(
                 if parent_conn.poll(0.05):
                     # get the instructions from the pipe and call adequate tool
                     tool_call_instructions = parent_conn.recv()
+                    # store executed tools data
+                    executed_tool = tool_call_instructions["tool"]
+                    executed_args = tool_call_instructions["args"]
                     # call tool
                     res_tool = await client.call_tool(
                         tool_call_instructions["tool"],
@@ -339,7 +453,7 @@ async def main(
                             output_tokens=llm_res.usage.output_tokens,
                             request_time_ms=request_time,
                             api_url=str(llm.client.base_url),
-                            model_name=llm_res.model,
+                            model_name=str(llm_res.model),
                             llm_output=llm_res.output_text,
                             sandbox_input=code,
                             sandbox_output="timeout",
@@ -349,6 +463,14 @@ async def main(
                 else:
                     type, res = queue.get()
                     observation = res
+
+                    if type == "output":
+                        tool_usage_extraction(
+                            executed_tool,
+                            executed_args,
+                            persistent_context,
+                            res
+                            )
                     if type == "output" and res == "":
                         observation = ("Code executed successfully"
                                        " with no output")
@@ -358,7 +480,7 @@ async def main(
                             output_tokens=llm_res.usage.output_tokens,
                             request_time_ms=request_time,
                             api_url=str(llm.client.base_url),
-                            model_name=llm_res.model,
+                            model_name=str(llm_res.model),
                             llm_output=llm_res.output_text,
                             sandbox_input=code,
                             sandbox_output=str(res),
