@@ -97,6 +97,10 @@ def create_prompt(manual: str) -> str:
         "\n"
 
         "EDITING POLICY:\n"
+        "Before calling edit_file, you MUST have "
+        "successfully inspected the exact"
+        "target code in a repository Observation during this run.\n"
+        "Do not construct old_str only from the problem statement.\n"
         "Use edit_file to modify repository files.\n"
         "Make the smallest source-code change necessary to solve the issue.\n"
         "Preserve existing behavior unless the task explicitly requires "
@@ -177,4 +181,17 @@ def create_prompt(manual: str) -> str:
         "start_line=1, end_line=50))\n"
         "```\n"
         "This is invalid because it performs two agent actions.\n"
+    )
+
+
+def final_prompt() -> str:
+    return (
+        "The official run_tests has passed. The task is solved.\n"
+        "Do not inspect, edit, test, search, or "
+        "reason about the repository anymore.\n"
+        "Your only permitted action is to submit the current patch.\n"
+        "Return exactly this executable Python code block and nothing else:\n"
+        "```python\n"
+        "final_answer(code=get_patch())\n"
+        "```"
     )
