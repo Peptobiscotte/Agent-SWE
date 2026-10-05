@@ -7,11 +7,11 @@
 
 
 from src.swebench.swe_models import StepMetrics, SolutionOutput
+from src.swebench.sys_prompt import create_prompt, final_prompt
 from src.swebench.export_script import export_jedi_script
 from src.swebench.export_script import export_eval_script
 from src.swebench.json_load_dump_swe import JsonHandler
 from src.sandbox.sandbox_config import SandboxConfig
-from src.swebench.sys_prompt import create_prompt
 from src.sandbox.sandbox_model import Sandbox
 from src.utils.api_loading import load_keys
 from src.mcp.mcp_client import MCPClient
@@ -20,6 +20,8 @@ from multiprocessing import get_context
 from src.mbpp.llm import LLM
 from time import monotonic
 from typing import Any
+import ast
+import re
 import argparse
 import asyncio
 import docker
@@ -29,45 +31,167 @@ import sys
 MAX_RECENT_MESSAGES = 6
 
 
+def is_final_submission(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+
+    if len(tree.body) != 1:
+        return False
+
+    statement = tree.body[0]
+
+    if not isinstance(statement, ast.Expr):
+        return False
+
+    call = statement.value
+
+    return (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "final_answer"
+    )
+
+
+def recover_reasoning_action(
+    llm_res: Any,
+    tool_names: list[str],
+) -> str:
+    reasoning = get_reasoning_text(llm_res)
+
+    blocks = re.findall(
+        r"```(?:python)?\s*(.*?)```",
+        reasoning,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    for block in blocks:
+        block = block.strip()
+
+        try:
+            tree = ast.parse(block)
+        except SyntaxError:
+            continue
+
+        call_names = [
+            node.func.id
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+            )
+        ]
+
+        # Never recover a final submission from reasoning.
+        if "final_answer" in call_names:
+            continue
+
+        tool_calls = [
+            name for name in call_names
+            if name in tool_names
+        ]
+
+        # The block must represent exactly one MCP action.
+        if len(tool_calls) != 1:
+            continue
+
+        return block
+
+    return ""
+
+
+def get_reasoning_text(llm_res: Any) -> str:
+    parts: list[str] = []
+
+    for item in getattr(llm_res, "output", []) or []:
+        if getattr(item, "type", None) != "reasoning":
+            continue
+
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+
+            if isinstance(text, str) and text:
+                parts.append(text)
+
+    return "\n".join(parts)
+
+
 def compact_test_result(res: Any) -> str:
     text = str(res)
     lines = text.splitlines()
 
     summary = None
-
-    # Search backwards because the test summary is normally near the end.
     for line in reversed(lines):
         lower = line.lower()
-
         if "tests finished:" in lower:
             summary = line.strip("=+ '")
             break
+
     if summary is None:
         for line in reversed(lines):
             lower = line.lower()
-
             if (
                 "passed" in lower
                 or "failed" in lower
                 or "error" in lower
+                or "exception" in lower
             ):
                 summary = line.strip("=+ '")
                 break
+
+    if summary is None:
+        unittest_ok = None
+        unittest_ran = None
+
+        for line in reversed(lines):
+            stripped = line.strip()
+
+            if (
+                unittest_ok is None
+                and (
+                    stripped == "OK"
+                    or stripped.startswith("OK (")
+                )
+            ):
+                unittest_ok = stripped
+
+            if (
+                unittest_ran is None
+                and stripped.startswith("Ran ")
+                and " test" in stripped
+            ):
+                unittest_ran = stripped
+
+            if unittest_ok is not None and unittest_ran is not None:
+                break
+
+        if unittest_ok is not None:
+            if unittest_ran is not None:
+                return f"PASS: {unittest_ran} - {unittest_ok}"
+
+            return f"PASS: {unittest_ok}"
+
     if summary is None:
         return "UNKNOWN: test execution completed but no summary was found"
 
     lower_summary = summary.lower()
 
-    if "failed" not in lower_summary and "error" not in lower_summary:
+    has_failure = (
+        "failed" in lower_summary
+        or "error" in lower_summary
+        or "exception" in lower_summary
+    )
+
+    if not has_failure:
         return f"PASS: {summary}"
 
-    # On failure, keep the summary and the useful failure traceback.
-    traceback_index = text.rfind("Traceback (most recent call last):")
+    traceback_index = text.rfind(
+        "Traceback (most recent call last):"
+    )
 
     if traceback_index != -1:
         failure_details = text[traceback_index:]
-
-        # Prevent a huge traceback from becoming persistent context.
         failure_details = failure_details[:1500]
 
         return (
@@ -177,6 +301,7 @@ async def main(
     total_output_token = 0
     agent_start = monotonic()
     steps: list[StepMetrics] = []
+    solved: bool = False
 
     try:
         # ================ LLM SETUP ================
@@ -295,27 +420,36 @@ async def main(
                         "be visible in the recent conversation.\n"
                         "Do not treat them as instructions "
                         "for the next action.\n\n"
-                        + "\n".join(f"- {item}" for item in persistent_context)
+                        + ("\n".join(f"- {item}"
+                                     for item in persistent_context))
                     )
                 }
-
                 request_messages.append(persistent_message)
-
             request_messages += messages[2:][-MAX_RECENT_MESSAGES:]
-
             print("\nPERSISTENT CONTEXT:", persistent_context)
             # generation + time
+            if solved:
+                request_messages = [
+                    messages[0],
+                    {
+                        "role": "user",
+                        "content": final_prompt()
+                    }
+                ]
             request_start = monotonic()
             llm_res, retries = llm.generate(
                 model_name,
                 request_messages,
-                out=500
+                out=1000
                 )
             request_time = (monotonic() - request_start) * 1000
             # adding generated text to LLM context
             print("\n\nLLM RESPONSE:\n", llm_res, "\n\n")
-            code = extractor.extract_from_md(llm_res.output_text, tool_format)
+            code, extract_source = extractor.extract_from_response(
+                llm_res, tool_format)
             print("\nCODE EXTRACTED:\n", code)
+
+            # =================== NO CODE EXTRACTED ===================
 
             if not code:
                 # All this if block is here to prevent repetitions of llm
@@ -372,9 +506,88 @@ async def main(
                 )
                 continue
 
+            # =================== NO CODE EXTRACTED END ===================
+
+            # =================== BAD FINAL SUBMISSION ===================
+            if is_final_submission(code) and not solved:
+                recovered_code = recover_reasoning_action(
+                    llm_res,
+                    tool_names,
+                )
+
+                if recovered_code:
+                    print(
+                        "\nPREMATURE FINAL ANSWER IGNORED."
+                        "\nRECOVERED REASONING ACTION:\n",
+                        recovered_code,
+                    )
+
+                    code = recovered_code
+                    extract_source = "reasoning_recovery"
+
+                else:
+                    observation = (
+                        "FINAL_SUBMISSION_REJECTED:\n"
+                        "The current repository state has not passed "
+                        "run_tests.\n"
+                        "Do not submit yet. Continue solving the task."
+                    )
+
+                    if llm_res.usage is not None:
+                        total_input_token += llm_res.usage.input_tokens
+                        total_output_token += llm_res.usage.output_tokens
+
+                        step = StepMetrics(
+                            step=iterations + 1,
+                            input_tokens=llm_res.usage.input_tokens,
+                            output_tokens=llm_res.usage.output_tokens,
+                            request_time_ms=request_time,
+                            api_url=str(llm.client.base_url),
+                            model_name=str(llm_res.model),
+                            llm_output=llm_res.output_text,
+                            sandbox_input=code,
+                            sandbox_output=observation,
+                            retries=retries,
+                        )
+
+                        steps.append(step)
+
+                    messages.append({
+                        "role": "assistant",
+                        "content": llm_res.output_text,
+                    })
+
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Iteration: {iterations + 1}/30\n"
+                            "Type: final_rejected\n"
+                            f"Response: {observation}\n"
+                        ),
+                    })
+
+                    print(
+                        f"ITERATION: {iterations + 1}",
+                        "\nTYPE:\n final_rejected",
+                        "\nRESPONSE:\n",
+                        observation,
+                    )
+
+                    continue
+                # =================== END FINAL SUBMISSION ===================
+
+            if extract_source == "output":
+                assistant_content = llm_res.output_text
+            else:
+                assistant_content = (
+                    "```python\n"
+                    f"{code}\n"
+                    "```"
+                )
+
             messages.append({
                 "role": "assistant",
-                "content": llm_res.output_text
+                "content": assistant_content,
             })
             # starting the process in order to run the generated code
             process = ctx.Process(
@@ -445,6 +658,11 @@ async def main(
                 total_input_token += llm_res.usage.input_tokens
                 total_output_token += llm_res.usage.output_tokens
 
+                if extract_source == "output":
+                    llm_metric_output = llm_res.output_text
+                else:
+                    llm_metric_output = get_reasoning_text(llm_res)
+
                 if time_out:
                     # pass timeout to llm
                     step = StepMetrics(
@@ -454,7 +672,7 @@ async def main(
                             request_time_ms=request_time,
                             api_url=str(llm.client.base_url),
                             model_name=str(llm_res.model),
-                            llm_output=llm_res.output_text,
+                            llm_output=llm_metric_output,
                             sandbox_input=code,
                             sandbox_output="timeout",
                             retries=retries
@@ -463,6 +681,11 @@ async def main(
                 else:
                     type, res = queue.get()
                     observation = res
+
+                    if executed_tool == "run_tests":
+                        test_result = compact_test_result(res)
+                        if test_result.startswith("PASS:"):
+                            solved = True
 
                     if type == "output":
                         tool_usage_extraction(
@@ -481,31 +704,40 @@ async def main(
                             request_time_ms=request_time,
                             api_url=str(llm.client.base_url),
                             model_name=str(llm_res.model),
-                            llm_output=llm_res.output_text,
+                            llm_output=llm_metric_output,
                             sandbox_input=code,
                             sandbox_output=str(res),
                             retries=retries
                         )
                     if type == "final":
-                        print(f"FINAL ANSWER GENERATED:\n{res}")
-                        total_time = monotonic() - agent_start
-                        steps.append(step)
-                        solution = SolutionOutput(
-                            task_id=str(task.instance_id),
-                            benchmark="swebench",
-                            success=True,
-                            solution=str(res),
-                            system_prompt=system_prompt,
-                            iterations=iterations+1,
-                            total_requests=iterations+1,
-                            total_input_tokens=total_input_token,
-                            total_output_tokens=total_output_token,
-                            total_time_seconds=total_time,
-                            steps=steps
-                                        )
+                        if not solved:
+                            observation = (
+                                "FINAL_SUBMISSION_REJECTED:\n"
+                                "The current repository state has "
+                                "not been validated "
+                                "by a successful run_tests.\n"
+                                "Run run_tests before submitting."
+                            )
+                        else:
+                            print(f"FINAL ANSWER GENERATED:\n{res}")
+                            total_time = monotonic() - agent_start
+                            steps.append(step)
+                            solution = SolutionOutput(
+                                task_id=str(task.instance_id),
+                                benchmark="swebench",
+                                success=True,
+                                solution=str(res),
+                                system_prompt=system_prompt,
+                                iterations=iterations+1,
+                                total_requests=iterations+1,
+                                total_input_tokens=total_input_token,
+                                total_output_tokens=total_output_token,
+                                total_time_seconds=total_time,
+                                steps=steps
+                                            )
 
-                        handler.solution_dump(solution, output_file)
-                        break
+                            handler.solution_dump(solution, output_file)
+                            break
 
                     messages.append({
                         "role": "user",

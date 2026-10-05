@@ -18,7 +18,7 @@ import sys
 
 MAX_RESULTS = 30
 MAX_OUTPUT_CHARS = 12_000
-MAX_READ_LINE = 100
+MAX_READ_LINE = 200
 
 mcp = FastMCP("SWEBENCH", host="127.0.0.1", port=8000)
 
@@ -105,6 +105,7 @@ def read_file(
     end_line: int
 ) -> str:
     trunc_msg = ""
+    requested_end = end_line
 
     if container is not None:
         res = container.exec_run(["cat", filepath], workdir="/testbed")
@@ -128,7 +129,11 @@ def read_file(
 
     if end_line - start_line + 1 > MAX_READ_LINE:
         end_line = start_line + MAX_READ_LINE - 1
-        trunc_msg = f"[TRUNCATED], maximum {MAX_READ_LINE} per call"
+        trunc_msg = (
+            f"[TRUNCATED: requested lines {start_line}-{requested_end}, "
+            f"returned {start_line}-{end_line}. "
+            f"Continue from line {end_line + 1}.]"
+        )
 
     selected = lines[start_line - 1:end_line]
     numbered = [
@@ -361,7 +366,10 @@ def edit_file(filepath: str, old_str: str, new_str: str) -> str:
                 "from pathlib import Path; "
                 f"Path({filepath!r}).write_text({new_content!r})"
             ),
-        ])
+        ],
+            workdir="/testbed",
+            user="0"
+        )
         if res.exit_code != 0:
             raise RuntimeError(res.output.decode())
     else:
@@ -373,11 +381,19 @@ def edit_file(filepath: str, old_str: str, new_str: str) -> str:
 @mcp.tool()
 def get_patch() -> str:
     if container is not None:
-        res = container.exec_run([
-            "git", "-c", "core.fileMode=false", "diff"
-        ])
+        res = container.exec_run(
+            [
+                "git",
+                "-c", "safe.directory=/testbed",
+                "-c", "core.fileMode=false",
+                "diff",
+            ],
+            workdir="/testbed",
+        )
+
         if res.exit_code != 0:
             raise RuntimeError(res.output.decode())
+
         return res.output.decode()
 
     if local_testbed is None:

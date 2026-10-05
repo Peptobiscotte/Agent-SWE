@@ -1,3 +1,5 @@
+# pyright: reportUnknownMemberType = false
+import ast
 from typing import Any
 
 
@@ -118,6 +120,159 @@ class Extractor:
                         param_term + len("</parameter>"):].strip()
         return params_list
 
+    def extract_from_response(
+            self,
+            llm_res: Any,
+            tools_dict: dict[str, Any]
+            ) -> tuple[str, str]:
+        """
+        Prefer the model final output.
+
+        If there is no executable action in output_text, cautiously fall back
+        to reasoning, but only when it contains exactly one unambiguous MCP
+        action.
+        """
+
+        output_text = getattr(llm_res, "output_text", "") or ""
+
+        code = self.extract_from_md(
+            output_text,
+            tools_dict
+        ).strip()
+
+        if code:
+            return code, "output"
+
+        reasoning = self._extract_reasoning_text(llm_res)
+
+        if not reasoning:
+            return "", "error"
+
+        blocks = self._extract_python_blocks(reasoning)
+
+        # Several code blocks means the model was considering several actions.
+        # Do not guess which one should actually be executed.
+        if len(blocks) != 1:
+            return "", "error"
+
+        candidate = blocks[0].strip()
+
+        if not self._is_single_tool_action(candidate, tools_dict):
+            return "", "error"
+
+        return candidate, "reasoning"
+
+    def _extract_reasoning_text(self, llm_res: Any) -> str:
+        parts: list[str] = []
+
+        for item in getattr(llm_res, "output", []) or []:
+            if getattr(item, "type", None) != "reasoning":
+                continue
+
+            for content in getattr(item, "content", []) or []:
+                text = getattr(content, "text", None)
+
+                if isinstance(text, str) and text:
+                    parts.append(text)
+
+        return "\n".join(parts)
+
+    def _extract_python_blocks(self, text: str) -> list[str]:
+        start = "```python"
+        end = "```"
+
+        blocks: list[str] = []
+        search_from = 0
+
+        while True:
+            start_index = text.find(start, search_from)
+
+            if start_index == -1:
+                break
+
+            start_index += len(start)
+
+            end_index = text.find(end, start_index)
+
+            if end_index == -1:
+                break
+
+            blocks.append(
+                text[start_index:end_index].strip()
+            )
+
+            search_from = end_index + len(end)
+
+        return blocks
+
+    def _is_single_tool_action(
+            self,
+            code: str,
+            tools_dict: dict[str, Any]
+            ) -> bool:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+
+        # The fallback must contain exactly one Python statement.
+        if len(tree.body) != 1:
+            return False
+
+        statement = tree.body[0]
+
+        if not isinstance(statement, ast.Expr):
+            return False
+
+        call = statement.value
+
+        if not isinstance(call, ast.Call):
+            return False
+
+        # Accept:
+        # print(read_file(...))
+        if (
+            isinstance(call.func, ast.Name)
+            and call.func.id == "print"
+        ):
+            if len(call.args) != 1 or call.keywords:
+                return False
+
+            call = call.args[0]
+
+            if not isinstance(call, ast.Call):
+                return False
+
+        # Accept:
+        # read_file(...)
+        # run_tests()
+        # edit_file(...)
+        if not isinstance(call.func, ast.Name):
+            return False
+
+        tool_name = call.func.id
+
+        if tool_name not in tools_dict:
+            return False
+
+        # Reject nested MCP calls.
+        nested_tools = []
+
+        for node in ast.walk(call):
+            if node is call:
+                continue
+
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in tools_dict
+            ):
+                nested_tools.append(node.func.id)
+
+        if nested_tools:
+            return False
+
+        return True
 
 # if __name__ == "__main__":
 #     tools = {
