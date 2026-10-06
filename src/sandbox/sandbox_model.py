@@ -49,6 +49,7 @@ class Sandbox():
         # final_answer is a tool exposed by the sandbox not the MCP serv
         # we define it here so it is always available
         self.last_tool_result: Any = None
+        self.last_sandbox_output = ""
         self.namespace: dict[str, Any] = {
             "final_answer": self.final_answer,
             "__builtins__": {
@@ -244,11 +245,11 @@ class Sandbox():
             res = self.execute(code, partial_conn)
             if ('File "<sandbox>"' in res or
                     "['timeout'" in res or "['error" in res):
-                queue.put(("error", res))
+                queue.put(("error", res, self.last_sandbox_output))
                 return
-            queue.put(("output", res))
+            queue.put(("output", res, self.last_sandbox_output))
         except FinalAnswerException as e:
-            queue.put(("final", e.code))
+            queue.put(("final", e.code, self.last_sandbox_output))
 
     def execute(self, code: str, partial_conn: Any = None) -> str:
         # exec the code and redirects all outputs (out and err)
@@ -262,18 +263,21 @@ class Sandbox():
         buffer_err = StringIO()
         try:
             self.last_tool_result = None
-
+            self.last_sandbox_output = ""
             with redirect_stdout(buffer):
+                # we use exec to run code as str
                 # we use compile to add our sandbox name for traceback
                 exec(compile(code, "<sandbox>", "exec"), self.namespace)
 
             output = buffer.getvalue()
-            if output:
-                return output
+            self.last_sandbox_output = output
             if self.last_tool_result is not None:
                 return str(self.last_tool_result)
+            if output:
+                return output
             return ""
         except FinalAnswerException:
+            self.last_sandbox_output = buffer.getvalue()
             raise
         except Exception as e:
             with redirect_stderr(buffer_err):
@@ -286,7 +290,11 @@ class Sandbox():
                     f"{type(e).__name__}: {e}\n{extract}",
                     file=sys.stderr
                     )
-            return buffer_err.getvalue()
+            self.last_sandbox_output = (
+                buffer.getvalue()
+                + buffer_err.getvalue()
+            )
+            return self.last_sandbox_output
 
     def final_answer(self, code: str) -> None:
         # we make final_answer an 'error' so that it instantly stops
