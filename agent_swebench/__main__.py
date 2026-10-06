@@ -752,6 +752,10 @@ async def main(
         print(
             f"\n\nTOTAL TOKEN USAGE: {total_input_token + total_output_token}"
         )
+        print(f"\n\nINPUT: {total_input_token}\n")
+        print(f"\n\nOUTPUT: {total_output_token}\n")
+        total_time = monotonic() - agent_start
+        print(f"\n\nTIME: {total_time}\n")
         print("\n\nSTEPS:\n")
         for step in steps:
             print("\n", step)
