@@ -7,6 +7,7 @@
 from src.mbpp.mbpp_models import StepMetrics, SolutionOutput
 from src.sandbox.sandbox_config import SandboxConfig
 from src.mbpp.json_load_dump import JsonHandler
+# from src.mbpp.sys_prompt import mbpp_system_prompt
 from src.sandbox.sandbox_model import Sandbox
 from src.utils.api_loading import load_keys
 from src.mcp.mcp_client import MCPClient
@@ -115,6 +116,10 @@ async def main(
         "Solve the task generally, not only for the public tests.\n"
         "Be concise: no explanations, docstrings, comments, "
         "examples, or extra tests.\n\n"
+        "Output exactly one complete executable "
+        "Python block and nothing else.\n"
+        "Do not explain or reason in prose.\n"
+        "Start your response immediately with ```python.\n"
 
         f"{manual}\n\n"
 
@@ -158,7 +163,8 @@ async def main(
             "Your response itself must be plain text "
             "containing the Python code block.\n\n"
         )
-
+    # REMOVE AFTER TESTING
+    # system_prompt = mbpp_system_prompt(manual)
     task_prompt = (
         f"Task definition:\n{task.task_definition}\n\n"
         f"Function definition:\n{task.function_definition}\n\n"
@@ -191,7 +197,7 @@ async def main(
                 print("MBPP output-token budget exhausted")
                 break
 
-            output_limit = min(500, remaining_output)
+            output_limit = min(200, remaining_output)
 
             # timing the request
             request_start = monotonic()
@@ -208,7 +214,8 @@ async def main(
             # ================ EXTRACTION ================
             print("\n\nLLM RESPONSE:\n", llm_res.output_text, "\n\n")
             extractor = Extractor()
-            code = extractor.extract_from_md(llm_res.output_text, tool_format)
+            code = extractor.extract_mbpp_from_md(
+                llm_res.output_text, tool_format)
             print("\nCODE EXTRACTED:\n", code)
 
             if not code:
