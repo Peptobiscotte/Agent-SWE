@@ -274,6 +274,112 @@ class Extractor:
 
         return True
 
+    def extract_mbpp_from_md(
+            self,
+            llm_out: str,
+            tools_dict: dict[str, Any]
+            ) -> str:
+        blocks = self._extract_python_blocks_mbpp(llm_out)
+
+        for block in blocks:
+            try:
+                tree = ast.parse(block)
+            except SyntaxError:
+                continue
+
+            # Case 1:
+            # code = '''def ...'''
+            # run_tests(code=code)
+            #
+            # We extract only the candidate and rebuild the canonical action.
+            for stmt in tree.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+
+                if len(stmt.targets) != 1:
+                    continue
+
+                target = stmt.targets[0]
+
+                if not (
+                    isinstance(target, ast.Name)
+                    and target.id == "code"
+                ):
+                    continue
+
+                try:
+                    candidate = ast.literal_eval(stmt.value)
+                except (ValueError, TypeError, SyntaxError):
+                    continue
+
+                if not isinstance(candidate, str):
+                    continue
+
+                try:
+                    ast.parse(candidate)
+                except SyntaxError:
+                    continue
+
+                return (
+                    f"code = {candidate!r}\n"
+                    "run_tests(code=code)"
+                )
+
+            # Case 2:
+            # ```python
+            # def foo(...):
+            #     ...
+            # ```
+            #
+            # Qwen often emits the candidate directly without run_tests().
+            has_function = any(
+                isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for stmt in tree.body
+            )
+
+            if has_function:
+                return (
+                    f"code = {block!r}\n"
+                    "run_tests(code=code)"
+                )
+
+        # Keep your existing XML/tool-call fallback.
+        return self.extract_from_md(llm_out, tools_dict)
+
+    def _extract_python_blocks_mbpp(self, text: str) -> list[str]:
+        start = "```python"
+        end = "```"
+
+        blocks: list[str] = []
+        search_from = 0
+
+        while True:
+            start_index = text.find(start, search_from)
+
+            if start_index == -1:
+                break
+
+            start_index += len(start)
+            end_index = text.find(end, start_index)
+
+            # MBPP models sometimes stop after valid Python without
+            # emitting the final Markdown fence.
+            if end_index == -1:
+                candidate = text[start_index:].strip()
+
+                if candidate:
+                    blocks.append(candidate)
+
+                break
+
+            blocks.append(
+                text[start_index:end_index].strip()
+            )
+
+            search_from = end_index + len(end)
+
+        return blocks
+
 # if __name__ == "__main__":
 #     tools = {
 #         'read_file':
