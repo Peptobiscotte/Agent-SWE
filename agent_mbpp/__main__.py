@@ -421,7 +421,7 @@ async def main(
                     })
                     continue
 
-                type, res = queue.get()
+                type, res, out = queue.get()
 
                 final_code: str | None = None
                 auto_finalized = False
@@ -466,7 +466,7 @@ async def main(
                         model_name=llm_res.model,
                         llm_output=llm_res.output_text,
                         sandbox_input=code,
-                        sandbox_output=str(observation),
+                        sandbox_output=str(observation + out),
                         retries=retries
                     )
 
