@@ -240,7 +240,7 @@ def search_code(pattern: str, file_pattern: str) -> str:
 
 
 @mcp.tool()
-def search_function_or_class_definition_in_code(name: str) -> str:
+def search_function_or_class_definition_in_code(name: str) -> Any:
     if container is not None:
         pattern = rf"^[[:space:]]*(def|class)[[:space:]]+{name}\b"
         res = container.exec_run(
@@ -379,7 +379,7 @@ def edit_file(filepath: str, old_str: str, new_str: str) -> str:
 
 
 @mcp.tool()
-def get_patch() -> str:
+def get_patch() -> Any:
     if container is not None:
         res = container.exec_run(
             [
@@ -448,7 +448,7 @@ def run_command(command: str, workdir: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def run_tests() -> str:
+def run_tests() -> Any:
     if container is None:
         # The sandbox tool exam only verifies that run_tests is callable.
         # The real SWE-bench evaluation script is injected in Docker mode.

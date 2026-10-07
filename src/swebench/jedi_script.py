@@ -6,7 +6,7 @@ import jedi
 import sys
 
 
-def jedi_script():
+def jedi_script() -> None:
     """
     This function uses the jedi module to get all references to a specified
     variable, found by its name, file and line. I returns found references

@@ -43,10 +43,11 @@ class MCPClient:
             read, write = await self.exit_stack.enter_async_context(
                 stdio_client(self.params)
             )
-        self.session = await self.exit_stack.enter_async_context(
+        session = await self.exit_stack.enter_async_context(
             ClientSession(read, write)
         )
-        await self.session.initialize()
+        self.session = session
+        await session.initialize()
 
     async def close(self) -> None:
         await self.exit_stack.aclose()

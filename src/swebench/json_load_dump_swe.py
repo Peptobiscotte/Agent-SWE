@@ -2,10 +2,11 @@
 from pathlib import Path
 from src.swebench.swe_models import SWEBenchTaskInput, SolutionOutput
 import json
+from typing import Any
 
 
 class JsonHandler():
-    def task_loader(self, path_file: str) -> SWEBenchTaskInput:
+    def task_loader(self, path_file: str) -> Any:
         """
         Loads a task from a json file and returns it as a
         SWEBenchTaskInput object

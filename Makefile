@@ -65,7 +65,7 @@ version:
 	$(UV_ENV) uv run which pydantic
 
 run-mbpp:
-	$(UV_ENV) uv run python -m agent_mbpp --task-file ../cache/mbpp_task.json --output ../cache/mbpp_solution.json --model-name "qwen/qwen3.8-27b" --provider-url "https://api.groq.com/openai/v1"
+	$(UV_ENV) uv run python -m agent_mbpp --task-file ../cache/mbpp_task.json --output ../cache/mbpp_solution.json --model-name "openai/gpt-oss-120b" --provider-url "https://api.groq.com/openai/v1"
 
 run-swe-groq:
 	$(UV_ENV) uv run python -m agent_swebench --task-file ../cache/django__django-11066.json --output ../cache/django__django-11066_solution.json --model-name "openai/gpt-oss-120b" --provider-url "https://api.groq.com/openai/v1"
@@ -98,14 +98,18 @@ clean:
 	@echo "Temporary files and caches removed."
 
 
+PY_FILES := $(shell find . -type f -name '*.py' ! -name 'models_public.py')
+
 lint:
-	$(UV_ENV) uv run flake8 src
-	$(UV_ENV) uv run mypy src \
+	$(UV_ENV) uv run flake8 $(PY_FILES)
+	$(UV_ENV) uv run mypy \
 		--warn-return-any \
 		--warn-unused-ignores \
 		--ignore-missing-imports \
+		--disable-error-code=import-not-found \
 		--disallow-untyped-defs \
-		--check-untyped-defs
+		--check-untyped-defs \
+		$(PY_FILES)
 
 
 lint-strict:

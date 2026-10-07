@@ -63,7 +63,7 @@ async def main(
 
     # if stdio on swebench:
     elif mcp_stdio and "swebench" in mcp_stdio:
-        task_file = "../cache/swebench_task.json"
+        task_file = "src/sandbox/swebench_task.json"
         handler = JsonHandler()
         task = handler.task_loader(task_file)
         docker_client = docker.from_env()

@@ -7,7 +7,7 @@
 from src.mbpp.mbpp_models import StepMetrics, SolutionOutput
 from src.sandbox.sandbox_config import SandboxConfig
 from src.mbpp.json_load_dump import JsonHandler
-# from src.mbpp.sys_prompt import mbpp_system_prompt
+from src.mbpp.sys_prompt import mbpp_system_prompt
 from src.sandbox.sandbox_model import Sandbox
 from src.utils.api_loading import load_keys
 from src.mcp.mcp_client import MCPClient
@@ -99,77 +99,18 @@ async def main(
     llm = LLM(provider_url, api_key_list)
     #
     # ================ PROMPT ================
-    #
-    system_prompt = (
-        "You are a coding agent solving an MBPP Python task.\n"
-        "Output exactly one complete executable ```python``` "
-        "block and nothing else.\n"
-        "Use the exact function signature provided.\n\n"
 
-        "The natural-language task definition is authoritative.\n"
-        "Public tests are incomplete examples and may not cover all "
-        "required behavior.\n"
-        "Before writing the solution, account for every semantic "
-        "requirement in the task definition, including qualifiers, "
-        "ordering rules, equivalence rules, and edge cases implied "
-        "by the wording.\n"
-        "Solve the task generally, not only for the public tests.\n"
-        "Be concise: no explanations, docstrings, comments, "
-        "examples, or extra tests.\n\n"
-        "Output exactly one complete executable "
-        "Python block and nothing else.\n"
-        "Do not explain or reason in prose.\n"
-        "Start your response immediately with ```python.\n"
-
-        f"{manual}\n\n"
-
-        "run_tests(...) and final_answer(...) already exist in the sandbox.\n"
-        "Never define, override, mock, or reimplement them.\n"
-        "Do not use XML or native API tool calling.\n"
-        "Write calls to them as ordinary Python code.\n\n"
-
-        "The agent automatically supplies the official "
-        "test_imports and test_list when run_tests is executed.\n"
-        "Do not pass, copy, modify, or invent tests yourself.\n"
-        "Call run_tests only as run_tests(code=code).\n\n"
-
-        "Workflow:\n"
-        "1. Read the task definition carefully and identify all "
-        "required behavior.\n"
-        "2. Store a general candidate solution in a variable named code.\n"
-        "3. Call result = run_tests(code=code).\n"
-        "4. If tests fail, fix the candidate on the next turn.\n"
-        "5. Passing tests only confirms the public cases; the "
-        "candidate must still implement the full task definition.\n"
-        "6. You may call final_answer(code=code) when tests pass, "
-        "but the agent will also automatically submit a candidate "
-        "that passes run_tests.\n\n"
-
-        "Required response shape:\n"
-        "```python\n"
-        "code = 'def example(x):\\n    return x'\n"
-        "run_tests(code=code)\n"
-        "```\n"
+    system_prompt = mbpp_system_prompt(manual)
+    public_tests = "\n".join(
+        task.test_imports + task.test_list
     )
-
-    if "gpt-oss-120b" in model_name:
-        system_prompt += (
-            "IMPORTANT: Do not use the model/API native "
-            "tool-calling mechanism.\n"
-            "run_tests and final_answer are Python "
-            "function names that you must WRITE "
-            "inside the output Python code; "
-            "they are executed later by the sandbox.\n"
-            "Your response itself must be plain text "
-            "containing the Python code block.\n\n"
-        )
-    # REMOVE AFTER TESTING
-    # system_prompt = mbpp_system_prompt(manual)
     task_prompt = (
-        f"Task definition:\n{task.task_definition}\n\n"
-        f"Function definition:\n{task.function_definition}\n\n"
-        # f"Official test imports:\n{task.test_imports!r}\n\n"
-        # f"Official public tests:\n{task.test_list!r}\n"
+        f"Task definition:\n"
+        f"{task.task_definition}\n\n"
+        f"Required function signature:\n"
+        f"{task.function_definition}\n\n"
+        f"Public tests:\n"
+        f"{public_tests}\n"
     )
     messages = [
         {
@@ -197,14 +138,18 @@ async def main(
                 print("MBPP output-token budget exhausted")
                 break
 
-            output_limit = min(200, remaining_output)
+            # limiting the output and the context window
+            output_limit = min(500, remaining_output)
+            request_messages = messages[:2]
+            if len(messages) > 2:
+                request_messages.append(messages[-1])
 
             # timing the request
             request_start = monotonic()
             # start the generation
             llm_res, retries = llm.generate(
                 model_name,
-                messages,
+                request_messages,
                 output_limit
             )
             total_requests += 1 + retries
@@ -217,7 +162,7 @@ async def main(
             code = extractor.extract_mbpp_from_md(
                 llm_res.output_text, tool_format)
             print("\nCODE EXTRACTED:\n", code)
-
+            # ================ NO CODE MGMT ================
             if not code:
                 # All this if block is here to prevent repetitions of llm
                 # output containing no executable code, we store the metric
@@ -225,14 +170,10 @@ async def main(
                 # llm's next generation. In case the next gen fails again for
                 # the same reason we dont add it again.
                 observation = (
-                    "NO_EXECUTABLE_CODE_EXTRACTED.\n"
-                    "Nothing was executed.\n"
-                    "Retry with exactly one SHORT "
-                    "complete ```python``` block.\n"
-                    "No explanations, docstrings, "
-                    "comments, examples, or tests.\n"
-                    "Use only a candidate code "
-                    "variable and run_tests(code=code)."
+                    "EXTRACTION_ERROR: No executable candidate was recovered. "
+                    "Return one ```python``` block containing "
+                    "code = <full function implementation> and "
+                    "run_tests(code=code)."
                 )
 
                 if llm_res.usage is not None:
@@ -276,7 +217,8 @@ async def main(
                     observation
                 )
                 continue
-
+            # ================ END NO CODE ================
+            # append only after no code verification
             messages.append({
                 "role": "assistant",
                 "content": llm_res.output_text
@@ -292,6 +234,7 @@ async def main(
             passed_test_result = None
             run_tests_called = False
             last_run_tests_result = None
+            candidate_code: str | None = None
 
             process = ctx.Process(
                 target=sandbox.worker,
@@ -450,12 +393,30 @@ async def main(
                     )
                 else:
                     if run_tests_called:
-                        observation = (
-                            "OFFICIAL TESTS EXECUTED:\n"
-                            f"{task.test_list!r}\n\n"
-                            "RESULT:\n"
-                            f"{last_run_tests_result}"
-                        )
+                        if (
+                            isinstance(last_run_tests_result, dict)
+                            and last_run_tests_result.get("status") == "error"
+                        ):
+                            observation = (
+                                "PREVIOUS_CANDIDATE:\n"
+                                f"{candidate_code}\n\n"
+                                "TEST_FAILURE:\n"
+                                f"test: {last_run_tests_result.get(
+                                    'failed_test')}\n"
+                                f"actual: {last_run_tests_result.get(
+                                    'actual')}\n"
+                                f"expected: {last_run_tests_result.get(
+                                    'expected')}\n\n"
+                                "The previous candidate failed. "
+                                "Change the implementation or "
+                                "semantic interpretation. "
+                                "Do not repeat the same logic."
+                            )
+                        else:
+                            observation = (
+                                "RUN_TESTS_RESULT:\n"
+                                f"{last_run_tests_result}"
+                            )
                     else:
                         observation = str(res)
                         if type == "output" and res == "":
