@@ -107,6 +107,11 @@ def create_prompt(manual: str) -> str:
         "changing it.\n"
         "Do not modify evaluation tests or repository tests to make the task "
         "pass.\n"
+        "When edit_file reports that old_str was not found:\n"
+        "- re-read the exact relevant lines;\n"
+        "- use the smallest unique exact substring possible;\n"
+        "- do not retry the same failed multiline old_str;\n"
+        "- preserve indentation and surrounding code unless it must change.\n"
         "\n"
 
         "TESTING POLICY:\n"

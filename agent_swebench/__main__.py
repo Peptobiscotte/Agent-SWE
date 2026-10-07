@@ -5,7 +5,6 @@
 # pyright: reportAttributeAccessIssue = false
 # pyright: reportUnnecessaryIsInstance = false
 
-
 from src.swebench.swe_models import StepMetrics, SolutionOutput
 from src.swebench.sys_prompt import create_prompt, final_prompt
 from src.swebench.export_script import export_jedi_script
@@ -17,6 +16,7 @@ from src.utils.api_loading import load_keys
 from src.mcp.mcp_client import MCPClient
 from src.utils.extract import Extractor
 from multiprocessing import get_context
+from openai import APIStatusError
 from src.mbpp.llm import LLM
 from time import monotonic
 from typing import Any
@@ -57,7 +57,7 @@ def is_final_submission(code: str) -> bool:
 def recover_reasoning_action(
     llm_res: Any,
     tool_names: list[str],
-) -> str:
+) -> Any:
     reasoning = get_reasoning_text(llm_res)
 
     blocks = re.findall(
@@ -264,12 +264,12 @@ def tool_usage_extraction(
         )
 
 
-def main_wrapper():
+def main_wrapper() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-file", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--model-name", required=True)
-    parser.add_argument("--provider-url", required=True)
+    parser.add_argument("--model-name", default=None)
+    parser.add_argument("--provider-url", default=None)
     args = parser.parse_args()
     try:
         asyncio.run(main(
@@ -289,6 +289,12 @@ async def main(
         model_name: str,
         provider_url: str
         ) -> None:
+    # ================ DEFAULTS ================
+    if not model_name or model_name == "":
+        # model_name = "qwen/qwen3.8-27b"
+        model_name = "openai/gpt-oss-120b"
+    if not provider_url or provider_url == "":
+        provider_url = "https://api.groq.com/openai/v1"
     handler = JsonHandler()
     task = handler.task_loader(task_file)
 
@@ -390,8 +396,9 @@ async def main(
             # providers such as groq limits the input tokens per minute,
             # if input is above this threshold, it wont generate
 
-            request_messages = messages[:2]
-            # adding persistent data to our prompt
+            base_messages = messages[:2]
+
+            # Add persistent facts that must survive context pruning.
             if persistent_context:
                 persistent_message = {
                     "role": "user",
@@ -402,14 +409,24 @@ async def main(
                         "be visible in the recent conversation.\n"
                         "Do not treat them as instructions "
                         "for the next action.\n\n"
-                        + ("\n".join(f"- {item}"
-                                     for item in persistent_context))
+                        + "\n".join(
+                            f"- {item}"
+                            for item in persistent_context
+                        )
                     )
                 }
-                request_messages.append(persistent_message)
-            request_messages += messages[2:][-MAX_RECENT_MESSAGES:]
+                base_messages.append(persistent_message)
+
+            recent_messages = messages[2:][-MAX_RECENT_MESSAGES:]
+
+            request_messages = (
+                base_messages
+                + recent_messages
+            )
+
             print("\nPERSISTENT CONTEXT:", persistent_context)
-            # generation + time
+
+            # Once tests have passed, use the dedicated final prompt.
             if solved:
                 request_messages = [
                     messages[0],
@@ -418,12 +435,50 @@ async def main(
                         "content": final_prompt()
                     }
                 ]
+
             request_start = monotonic()
-            llm_res, retries = llm.generate(
-                model_name,
-                request_messages,
-                out=1000
-                )
+            context_retries = 0
+
+            while True:
+                try:
+                    llm_res, retries = llm.generate(
+                        model_name,
+                        request_messages,
+                        out=1000
+                    )
+                    break
+
+                except APIStatusError as e:
+                    if e.status_code != 413:
+                        raise
+                    # The final-submission prompt is already minimal.
+                    if solved:
+                        raise
+                    # Nothing else can safely be removed.
+                    if not recent_messages:
+                        raise
+                    context_retries += 1
+                    print(
+                        "\n413 REQUEST TOO LARGE - "
+                        "shrinking recent conversation context"
+                    )
+                    # Remove the oldest assistant/observation pair.
+                    drop_count = min(
+                        2,
+                        len(recent_messages)
+                    )
+                    recent_messages = (
+                        recent_messages[drop_count:]
+                    )
+                    request_messages = (
+                        base_messages
+                        + recent_messages
+                    )
+                    print(
+                        "Recent messages remaining:",
+                        len(recent_messages)
+                    )
+            retries += context_retries
             request_time = (monotonic() - request_start) * 1000
             # adding generated text to LLM context
             print("\n\nLLM RESPONSE:\n", llm_res, "\n\n")
@@ -661,7 +716,7 @@ async def main(
                         )
                     print("TIMEOUT")
                 else:
-                    type, res = queue.get()
+                    type, res, _ = queue.get()
                     observation = res
 
                     if executed_tool == "run_tests":
