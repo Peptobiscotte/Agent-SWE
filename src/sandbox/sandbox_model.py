@@ -140,7 +140,7 @@ class Sandbox():
             name: str,
             globals: Mapping[str, object] | None = None,
             locals: Mapping[str, object] | None = None,
-            fromlist: Sequence[str] | None = (),
+            fromlist: Sequence[str] = (),
             level: int = 0
     ) -> ModuleType:
         """
@@ -200,8 +200,8 @@ class Sandbox():
             )
         raise PermissionError(f"Forbidden path {file}")
 
-    def make_proxy(self, name: str, child_conn: Connection):
-        def proxy(**kwargs: Any):
+    def make_proxy(self, name: str, child_conn: Connection) -> Callable:
+        def proxy(**kwargs: Any) -> Any:
             instructions = {
                 "type": "tool_call",
                 "tool": name,
@@ -256,6 +256,7 @@ class Sandbox():
         # to buffer *file*, returning its value
         # doing so assures no print on terminal during execution
         # and allows persistance of printed datas
+        buffer: StreamingBuffer | StringIO
         if partial_conn is not None:
             buffer = StreamingBuffer(partial_conn)
         else:

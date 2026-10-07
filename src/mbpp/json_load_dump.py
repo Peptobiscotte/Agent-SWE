@@ -2,10 +2,11 @@
 from pathlib import Path
 from src.mbpp.mbpp_models import MBPPTaskInput, SolutionOutput
 import json
+from typing import Any
 
 
 class JsonHandler():
-    def task_loader(self, path_file: str) -> MBPPTaskInput:
+    def task_loader(self, path_file: str) -> Any:
         """
         Loads a task from a json file and returns it as a
         MBPPTaskInput object

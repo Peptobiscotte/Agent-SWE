@@ -1,4 +1,5 @@
 # pyright: reportUnknownMemberType = false
+import re
 import ast
 from typing import Any
 
@@ -280,18 +281,65 @@ class Extractor:
             tools_dict: dict[str, Any]
             ) -> str:
         blocks = self._extract_python_blocks_mbpp(llm_out)
+        # The last block is preferred because models often correct
+        # themselves later in the same response.
+        for block in reversed(blocks):
+            candidate = self._extract_mbpp_code_assignment(block)
 
-        for block in blocks:
+            if candidate is not None:
+                return (
+                    f"code = {candidate!r}\n"
+                    "run_tests(code=code)"
+                )
+
+            # Direct function implementation:
+            #
+            # ```python
+            # def foo(...):
+            #     ...
+            # ```
+            #
+            # A malformed candidate is still forwarded to run_tests,
+            # which can return a useful SyntaxError to the model.
+            if re.search(
+                r"(?m)^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s*\(",
+                block
+            ):
+                return (
+                    f"code = {block!r}\n"
+                    "run_tests(code=code)"
+                )
+
+        return self.extract_from_md(llm_out, tools_dict)
+
+    def _extract_mbpp_code_assignment(
+            self,
+            block: str
+            ) -> str | None:
+        """
+        Recover `code = <string>` even if text after the assignment
+        is malformed or truncated.
+        """
+        lines = block.splitlines()
+
+        # Try progressively shorter prefixes.
+        #
+        # This recovers:
+        #
+        # code = '''def foo(...):
+        #     ...
+        # '''
+        # run_tests(code=
+        #
+        # even though the complete block is invalid Python.
+        for end in range(len(lines), 0, -1):
+            prefix = "\n".join(lines[:end])
+
             try:
-                tree = ast.parse(block)
+                tree = ast.parse(prefix)
             except SyntaxError:
                 continue
 
-            # Case 1:
-            # code = '''def ...'''
-            # run_tests(code=code)
-            #
-            # We extract only the candidate and rebuild the canonical action.
             for stmt in tree.body:
                 if not isinstance(stmt, ast.Assign):
                     continue
@@ -312,58 +360,40 @@ class Extractor:
                 except (ValueError, TypeError, SyntaxError):
                     continue
 
-                if not isinstance(candidate, str):
-                    continue
+                if isinstance(candidate, str):
+                    return candidate
 
-                try:
-                    ast.parse(candidate)
-                except SyntaxError:
-                    continue
+        return None
 
-                return (
-                    f"code = {candidate!r}\n"
-                    "run_tests(code=code)"
-                )
-
-            # Case 2:
-            # ```python
-            # def foo(...):
-            #     ...
-            # ```
-            #
-            # Qwen often emits the candidate directly without run_tests().
-            has_function = any(
-                isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
-                for stmt in tree.body
-            )
-
-            if has_function:
-                return (
-                    f"code = {block!r}\n"
-                    "run_tests(code=code)"
-                )
-
-        # Keep your existing XML/tool-call fallback.
-        return self.extract_from_md(llm_out, tools_dict)
-
-    def _extract_python_blocks_mbpp(self, text: str) -> list[str]:
-        start = "```python"
-        end = "```"
-
+    def _extract_python_blocks_mbpp(
+            self,
+            text: str
+            ) -> list[str]:
         blocks: list[str] = []
+
+        # Accept:
+        # ```python
+        # ``` python
+        # ```   python
+        # and capitalization variants.
+        start_pattern = re.compile(
+            r"```[ \t]*python[ \t]*(?:\r?\n)?",
+            re.IGNORECASE
+        )
+
         search_from = 0
 
         while True:
-            start_index = text.find(start, search_from)
+            match = start_pattern.search(text, search_from)
 
-            if start_index == -1:
+            if match is None:
                 break
 
-            start_index += len(start)
-            end_index = text.find(end, start_index)
+            start_index = match.end()
+            end_index = text.find("```", start_index)
 
-            # MBPP models sometimes stop after valid Python without
-            # emitting the final Markdown fence.
+            # If generation was truncated after otherwise usable Python,
+            # keep the remaining text and let later validation decide.
             if end_index == -1:
                 candidate = text[start_index:].strip()
 
@@ -372,11 +402,12 @@ class Extractor:
 
                 break
 
-            blocks.append(
-                text[start_index:end_index].strip()
-            )
+            candidate = text[start_index:end_index].strip()
 
-            search_from = end_index + len(end)
+            if candidate:
+                blocks.append(candidate)
+
+            search_from = end_index + 3
 
         return blocks
 

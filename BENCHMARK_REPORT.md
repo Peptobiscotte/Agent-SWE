@@ -66,7 +66,7 @@ For every **model × task** combination, record pass/fail, iterations, total inp
 
 | Model | Tasks solved | Solve rate | Avg. iterations | Avg. input tokens | Avg. output tokens | Avg. wall-clock time (s) |
 |---|---:|---:|---:|---:|---:|---:|
-| `gpt-oss-120b` | `3/3` | `66%` | `6.3` | `22946` | `833` | `38.6` |
+| `gpt-oss-120b` | `3/3` | `100%` | `6.3` | `22946` | `833` | `38.6` |
 | `qwen3.8-27b` | `2/3` | `66%` | `9` | `24775` | `430` | `37.6` |
 | `nemotron-3-ultra-550b` | `1/3` | `33%` | `24.3` | `42646` | `1238` | `78.8` |
 | `cohere/north-mini` | `0/3` | `0%` | `30` | `55360` | `4523` | `73.6` |

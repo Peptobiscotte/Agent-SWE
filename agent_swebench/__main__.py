@@ -361,24 +361,6 @@ async def main(
         #
         config = SandboxConfig()
         sandbox = Sandbox(config)
-        # code = "print(read_file(
-        # filepath='AUTHORS', start_line=19, end_line=2))"
-        # code = "print(list_files(
-        # directory='/testbed/sympy', pattern='*.py'))"
-        # code = "print(search_code(pattern='gradient', file_pattern='*.py'))"
-        # code = "print(search_function_or_class_definition_in_code(
-        # name='_check_vector'))"
-        # code = "print(find_references(
-        # name='Vector', filepath='/testbed/sympy/physics/vector/vector.py',
-        # line=10))"
-        # code = "print(edit_file(filepath='/testbed/AUTHORS', old_str=
-        # 'There are a total of 704 authors', new_str='SUCCE$$'))"
-        # code = "print(get_patch())"
-        # code = "print(run_command(command='exit 42', workdir='/testbed'))"
-        # code = "print(run_tests())"
-        #
-        # create / start / listen process
-        #
         #
         # ================ PROMPT ================
         #
