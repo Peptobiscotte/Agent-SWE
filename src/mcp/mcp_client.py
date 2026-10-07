@@ -83,7 +83,7 @@ class MCPClient:
 
 
 async def main() -> None:
-    client = MCPClient()
+    client = MCPClient(None, None)
     await client.connect()
     await client.load_tools()
     print(await client.call_tool("add", {"a": 2, "b": 4}))

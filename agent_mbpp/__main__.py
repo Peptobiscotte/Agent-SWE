@@ -20,7 +20,7 @@ import asyncio
 import sys
 
 
-def main_wrapper():
+def main_wrapper() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-file", required=True)
     parser.add_argument("--output", required=True)
