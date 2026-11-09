@@ -1,10 +1,8 @@
-*This activity has been created as part of the 42 curriculum by mmonnier.*
-
-# Agent Smith
+# Agent SWE
 
 ## Description
 
-Agent Smith is an autonomous coding-agent project built for the 42 curriculum. Its goal is to let a language model solve programming tasks through an iterative **Thought → Code → Observation** loop while keeping model-generated code inside a controlled execution environment.
+Agent SWE is an autonomous coding-agent project built for the 42 curriculum. Its goal is to let a language model solve programming tasks through an iterative **Thought → Code → Observation** loop while keeping model-generated code inside a controlled execution environment.
 
 The project targets two benchmarks:
 
